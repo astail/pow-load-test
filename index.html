@@ -36,6 +36,9 @@
   textarea { width:100%; height:150px; background:#0b0d11; color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:8px; font:12px/1.5 ui-monospace,Menlo,monospace; resize:vertical; }
   #summary { display:none; border-color:var(--ok); }
   #err { display:none; color:var(--bad); font-size:13px; margin-top:8px; }
+  #white { display:none; position:fixed; inset:0; background:#fff; color:#111; z-index:999; flex-direction:column; align-items:center; justify-content:flex-end; padding:20px 20px calc(24px + env(safe-area-inset-bottom)); }
+  #white .info { font:600 15px/1.6 -apple-system,BlinkMacSystemFont,"Hiragino Sans","Noto Sans JP",sans-serif; color:#555; margin-bottom:12px; text-align:center; font-variant-numeric:tabular-nums; }
+  #white button { max-width:320px; background:#d33; color:#fff; }
   button.max { background:#2b1a1a; border:1px solid var(--bad); color:var(--bad); margin-bottom:10px; }
 </style>
 </head>
@@ -93,7 +96,15 @@
       <input type="checkbox" id="geo">
       <span>GPS（位置情報）も使う<span class="badge" id="geoState">未使用</span><br><span class="note">高精度の位置取得を続けます。位置情報は端末内で使うだけで、保存も送信もしません。許可のダイアログが出ます。</span></span>
     </label>
-    <button class="max" id="max">全開プリセット（CPU・GPU・GPSを全開）</button>
+    <label class="row" style="margin-bottom:12px">
+      <input type="checkbox" id="wmode">
+      <span>画面を真っ白にする（全画面表示）<br><span class="note">最大輝度の白で全面表示します。有機ELの端末では特に消費が増えます。画面下の「停止」ボタンで止められます。</span></span>
+    </label>
+    <label class="row" style="margin-bottom:12px">
+      <input type="checkbox" id="torch">
+      <span>ライト（フラッシュ）を点灯<span class="badge" id="torchState">未使用</span><br><span class="note">AndroidのChromeなどで使えます。カメラの許可が必要で、映像は保存も送信もしません。長時間の点灯は発熱するので注意してください。</span></span>
+    </label>
+    <button class="max" id="max">全開プリセット（CPU・GPU・GPS・白画面・ライト）</button>
     <button id="go" disabled>開始</button>
     <div id="err"></div>
   </div>
@@ -129,6 +140,11 @@
   <p class="note">電池を最速で減らすコツ: 画面の明るさを最大にする、省電力モードをオフにする、充電ケーブルを外す、「全開プリセット」を使う（GPSは屋外のほうが消費が大きくなります）。画面表示が最も大きな消費源です。</p>
   <p class="note">バッテリー情報（Battery Status API）はAndroidのChromeなどで取得できます。iPhoneのSafariでは取得できないため、開始前後の電池残量を手動で控えてください。</p>
 </main>
+
+<div id="white">
+  <div class="info" id="wInfo">測定中…</div>
+  <button id="wStop">停止</button>
+</div>
 
 <!-- Worker本体（Blob経由で起動）。SHA-256を自前実装し、52バイト入力の二重ハッシュを繰り返す -->
 <script type="text/js-worker" id="wsrc">
@@ -361,6 +377,40 @@ onmessage = (e) => {
     $('geoState').classList.remove('on'); $('geoState').textContent = '未使用';
   }
 
+  // 画面を真っ白にする全画面オーバーレイ
+  function whiteOn() {
+    $('white').style.display = 'flex';
+    try { const r = document.documentElement.requestFullscreen && document.documentElement.requestFullscreen(); if (r && r.catch) r.catch(() => {}); } catch (e) {}
+  }
+  function whiteOff() {
+    $('white').style.display = 'none';
+    try { if (document.fullscreenElement) { const r = document.exitFullscreen(); if (r && r.catch) r.catch(() => {}); } } catch (e) {}
+  }
+
+  // ライト（カメラのトーチ）。映像は使わず、トーチだけ点灯する
+  let torchStream = null;
+  async function torchStart() {
+    if (torchStream) return;
+    const st = $('torchState');
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { st.textContent = '非対応'; return; }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } } });
+      const track = stream.getVideoTracks()[0];
+      const caps = track && track.getCapabilities ? track.getCapabilities() : {};
+      if (!caps.torch) { stream.getTracks().forEach((t) => t.stop()); st.textContent = 'この端末では点灯できません'; return; }
+      await track.applyConstraints({ advanced: [{ torch: true }] });
+      if (!running || !$('torch').checked) { stream.getTracks().forEach((t) => t.stop()); return; }
+      torchStream = stream; st.classList.add('on'); st.textContent = '点灯中';
+    } catch (e) {
+      st.classList.remove('on');
+      st.textContent = (e && e.name === 'NotAllowedError') ? '許可されませんでした' : '利用不可';
+    }
+  }
+  function torchStop() {
+    if (torchStream) { torchStream.getTracks().forEach((t) => { try { t.stop(); } catch (e) {} }); torchStream = null; }
+    $('torchState').classList.remove('on'); $('torchState').textContent = '未使用';
+  }
+
   function showErr(msg) { const e = $('err'); e.textContent = msg; e.style.display = msg ? 'block' : 'none'; }
 
   function start() {
@@ -391,6 +441,8 @@ onmessage = (e) => {
     takeWake();
     if (+$('gpu').value > 0) gpuStart();
     if ($('geo').checked) geoStart();
+    if ($('torch').checked) torchStart();
+    if ($('wmode').checked) whiteOn();
     $('go').textContent = '停止'; $('go').classList.add('stop'); $('go').disabled = false;
     $('threads').disabled = true; $('consent').disabled = true; $('auto').disabled = true;
     timer = setInterval(render, 500);
@@ -422,6 +474,10 @@ onmessage = (e) => {
     $('sShares').textContent = String(shares);
     $('sTime').textContent = fmtTime(el);
     $('sFps').innerHTML = gpu.on ? gpu.fps.toFixed(0) + '<small> fps</small>' : '-';
+    if ($('white').style.display === 'flex') {
+      const lvw = level();
+      $('wInfo').textContent = fmtTime(el) + ' ・ ' + plainRate(rate) + (lvw === null ? '' : ' ・ 電池 ' + lvw + '%' + (battStart !== null ? '（-' + (battStart - lvw) + 'pt）' : ''));
+    }
     $('sLoad').innerHTML = '<small>CPU ' + workers.length + '×' + $('duty').value + '%' + (gpu.on ? ' / GPU ' + $('gpu').value + '%' : '') + '</small>';
     if (lv !== null && battStart !== null) {
       const d = battStart - lv;
@@ -446,7 +502,7 @@ onmessage = (e) => {
     const lv = level();
     running = false;
     clearInterval(timer);
-    cleanup(); dropWake(); gpuStop(); geoStop();
+    cleanup(); dropWake(); gpuStop(); geoStop(); torchStop(); whiteOff();
     let html = '<div>実行時間: <b>' + fmtTime(el) + '</b> ／ 平均 <b>' + plainRate(avg) + '</b> ／ 累計 <b>' + fmtNum(total) + '</b> ハッシュ ／ シェア <b>' + shares + '</b></div>';
     if (lv !== null && battStart !== null) {
       const d = battStart - lv;
@@ -454,7 +510,7 @@ onmessage = (e) => {
     } else {
       html += '<div class="note">バッテリー情報なし。開始前後の電池残量を手動で比べてください。</div>';
     }
-    html += '<div class="note">スレッド' + $('threads').value + '・負荷率' + $('duty').value + '%・難易度' + $('diff').value + 'bit・GPU' + $('gpu').value + '%' + ($('geo').checked ? '・GPS' : '') + (hiddenMs > 0 ? '・バックグラウンド ' + Math.round(hiddenMs / 1000) + '秒を含む' : '') + '</div>';
+    html += '<div class="note">スレッド' + $('threads').value + '・負荷率' + $('duty').value + '%・難易度' + $('diff').value + 'bit・GPU' + $('gpu').value + '%' + ($('geo').checked ? '・GPS' : '') + ($('wmode').checked ? '・白画面' : '') + ($('torch').checked ? '・ライト' : '') + (hiddenMs > 0 ? '・バックグラウンド ' + Math.round(hiddenMs / 1000) + '秒を含む' : '') + '</div>';
     $('sumBody').innerHTML = html; $('summary').style.display = 'block';
     $('go').textContent = '開始'; $('go').classList.remove('stop');
     $('threads').disabled = false; $('consent').disabled = false; $('auto').disabled = false;
@@ -463,9 +519,12 @@ onmessage = (e) => {
   }
 
   $('geo').addEventListener('change', () => { if (running) { if ($('geo').checked) geoStart(); else geoStop(); } });
+  $('wmode').addEventListener('change', () => { if (running) { if ($('wmode').checked) whiteOn(); else whiteOff(); } });
+  $('torch').addEventListener('change', () => { if (running) { if ($('torch').checked) torchStart(); else torchStop(); } });
+  $('wStop').addEventListener('click', () => stop());
   $('max').addEventListener('click', () => {
     if (running) return;
-    $('threads').value = $('threads').max; $('duty').value = 100; $('gpu').value = 100; $('auto').value = '60'; $('geo').checked = true;
+    $('threads').value = $('threads').max; $('duty').value = 100; $('gpu').value = 100; $('auto').value = '60'; $('geo').checked = true; $('wmode').checked = true; $('torch').checked = true;
     syncLabels();
   });
   $('go').addEventListener('click', () => (running ? stop() : start()));
