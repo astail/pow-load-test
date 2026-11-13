@@ -89,7 +89,11 @@
       <input type="checkbox" id="wake" checked>
       <span>実行中は画面を消さない（Wake Lock）<span class="badge" id="wakeState">未使用</span></span>
     </label>
-    <button class="max" id="max">全開プリセット（最速で電池を減らす設定）</button>
+    <label class="row" style="margin-bottom:12px">
+      <input type="checkbox" id="geo">
+      <span>GPS（位置情報）も使う<span class="badge" id="geoState">未使用</span><br><span class="note">高精度の位置取得を続けます。位置情報は端末内で使うだけで、保存も送信もしません。許可のダイアログが出ます。</span></span>
+    </label>
+    <button class="max" id="max">全開プリセット（CPU・GPU・GPSを全開）</button>
     <button id="go" disabled>開始</button>
     <div id="err"></div>
   </div>
@@ -122,7 +126,7 @@
     <button class="ghost" id="copy">ログをコピー</button>
   </div>
 
-  <p class="note">電池を最速で減らすコツ: 画面の明るさを最大にする、省電力モードをオフにする、充電ケーブルを外す、「全開プリセット」を使う。画面表示が最も大きな消費源です。</p>
+  <p class="note">電池を最速で減らすコツ: 画面の明るさを最大にする、省電力モードをオフにする、充電ケーブルを外す、「全開プリセット」を使う（GPSは屋外のほうが消費が大きくなります）。画面表示が最も大きな消費源です。</p>
   <p class="note">バッテリー情報（Battery Status API）はAndroidのChromeなどで取得できます。iPhoneのSafariでは取得できないため、開始前後の電池残量を手動で控えてください。</p>
 </main>
 
@@ -335,6 +339,28 @@ onmessage = (e) => {
   function gpuStop() { gpu.on = false; cancelAnimationFrame(gpu.raf); gpu.fps = 0; cv.style.display = 'none'; }
   function gpuApply() { if (!running) return; if (+$('gpu').value > 0) gpuStart(); else gpuStop(); }
 
+  // GPS（Geolocation）: 高精度の連続取得で測位チップと電波を使わせる
+  let geoId = null, geoCount = 0;
+  function geoStart() {
+    if (geoId !== null) return;
+    const st = $('geoState');
+    if (!navigator.geolocation) { st.textContent = '非対応'; return; }
+    geoCount = 0;
+    try {
+      geoId = navigator.geolocation.watchPosition((pos) => {
+        geoCount++; st.classList.add('on');
+        st.textContent = '取得中 ±' + Math.round(pos.coords.accuracy) + 'm（' + geoCount + '回）';
+      }, (err) => {
+        st.classList.remove('on');
+        st.textContent = err.code === 1 ? '許可されませんでした' : '取得できません';
+      }, { enableHighAccuracy: true, maximumAge: 0, timeout: 30000 });
+    } catch (e) { st.textContent = '利用不可'; }
+  }
+  function geoStop() {
+    if (geoId !== null) { try { navigator.geolocation.clearWatch(geoId); } catch (e) {} geoId = null; }
+    $('geoState').classList.remove('on'); $('geoState').textContent = '未使用';
+  }
+
   function showErr(msg) { const e = $('err'); e.textContent = msg; e.style.display = msg ? 'block' : 'none'; }
 
   function start() {
@@ -364,6 +390,7 @@ onmessage = (e) => {
     workers.forEach((w) => w.postMessage(m));
     takeWake();
     if (+$('gpu').value > 0) gpuStart();
+    if ($('geo').checked) geoStart();
     $('go').textContent = '停止'; $('go').classList.add('stop'); $('go').disabled = false;
     $('threads').disabled = true; $('consent').disabled = true; $('auto').disabled = true;
     timer = setInterval(render, 500);
@@ -419,7 +446,7 @@ onmessage = (e) => {
     const lv = level();
     running = false;
     clearInterval(timer);
-    cleanup(); dropWake(); gpuStop();
+    cleanup(); dropWake(); gpuStop(); geoStop();
     let html = '<div>実行時間: <b>' + fmtTime(el) + '</b> ／ 平均 <b>' + plainRate(avg) + '</b> ／ 累計 <b>' + fmtNum(total) + '</b> ハッシュ ／ シェア <b>' + shares + '</b></div>';
     if (lv !== null && battStart !== null) {
       const d = battStart - lv;
@@ -427,7 +454,7 @@ onmessage = (e) => {
     } else {
       html += '<div class="note">バッテリー情報なし。開始前後の電池残量を手動で比べてください。</div>';
     }
-    html += '<div class="note">スレッド' + $('threads').value + '・負荷率' + $('duty').value + '%・難易度' + $('diff').value + 'bit・GPU' + $('gpu').value + '%' + (hiddenMs > 0 ? '・バックグラウンド ' + Math.round(hiddenMs / 1000) + '秒を含む' : '') + '</div>';
+    html += '<div class="note">スレッド' + $('threads').value + '・負荷率' + $('duty').value + '%・難易度' + $('diff').value + 'bit・GPU' + $('gpu').value + '%' + ($('geo').checked ? '・GPS' : '') + (hiddenMs > 0 ? '・バックグラウンド ' + Math.round(hiddenMs / 1000) + '秒を含む' : '') + '</div>';
     $('sumBody').innerHTML = html; $('summary').style.display = 'block';
     $('go').textContent = '開始'; $('go').classList.remove('stop');
     $('threads').disabled = false; $('consent').disabled = false; $('auto').disabled = false;
@@ -435,9 +462,10 @@ onmessage = (e) => {
     $('bgNote').style.display = 'none';
   }
 
+  $('geo').addEventListener('change', () => { if (running) { if ($('geo').checked) geoStart(); else geoStop(); } });
   $('max').addEventListener('click', () => {
     if (running) return;
-    $('threads').value = $('threads').max; $('duty').value = 100; $('gpu').value = 100; $('auto').value = '60';
+    $('threads').value = $('threads').max; $('duty').value = 100; $('gpu').value = 100; $('auto').value = '60'; $('geo').checked = true;
     syncLabels();
   });
   $('go').addEventListener('click', () => (running ? stop() : start()));
